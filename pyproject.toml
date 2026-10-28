@@ -1,0 +1,14 @@
+[project]
+name = "val-qq-bot"
+version = "0.1.0"
+requires-python = ">=3.10"
+
+[tool.nonebot]
+adapters = [
+  { name = "OneBot V11", module_name = "nonebot.adapters.onebot.v11" },
+]
+plugins = [
+  "nonebot_plugin_apscheduler",
+  "nonebot_plugin_varolant",
+]
+plugin_dirs = ["plugins"]

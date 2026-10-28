@@ -1,0 +1,7 @@
+@echo off
+rem 一键启动：NapCat + 机器人（复制本文件为 start-all.bat 后把 QQ 号改成你的机器人 QQ）
+chcp 65001 >nul
+cd /d %~dp0
+start "NapCat" /D "napcat-installer\NapCat.XXXXX.Shell" NapCatWinBootMain.exe 你的机器人QQ号
+timeout /t 5 >nul
+start "val-qq-bot" /MIN venv\Scripts\python bot.py

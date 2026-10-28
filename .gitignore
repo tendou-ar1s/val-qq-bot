@@ -1,0 +1,35 @@
+﻿# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# 运行数据（含 QQ 号等隐私）
+plugins/data/
+*.log
+
+# NapCat 本体与登录数据（体积大且含登录态，绝不上传）
+napcat-installer/
+
+# 本机环境配置
+.env.prod
+.env.local
+
+# 临时文件
+.tmp/
+.tmp_*.py
+*.tmp
+
+# IDE
+.vscode/
+.idea/
+
+# 真实配置（含 QQ 号，用 *.example 模板代替）
+config.json
+start-all.bat
+startup-task.bat
+run.bat
+
+# 个人运维说明书（含真实 QQ 号与 WebUI token）
+说明书.md
+

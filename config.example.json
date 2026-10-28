@@ -1,0 +1,9 @@
+# 复制本文件为 config.json 后填入自己的信息
+{
+  "group_id": 123456789,
+  "interval_minutes": 30,
+  "members": [
+    { "qq": 100000001, "note": "示例成员A" },
+    { "qq": 100000002, "note": "示例成员B" }
+  ]
+}
