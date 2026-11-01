@@ -251,6 +251,36 @@ try:
 except Exception as e:
     check("结算图渲染冒烟", False, f"{type(e).__name__}: {e}")
 
+# ---------- 5. 登录保活与失效告警 ----------
+import inspect as _inspect
+
+bc_src = (Path(__file__).resolve().parent.parent /
+          "plugins" / "val_broadcaster" / "__init__.py").read_text("utf-8")
+check("保活任务已注册",
+      'id="val_broadcaster_keepalive"' in bc_src, "缺少 keepalive 定时任务")
+check("保活间隔为 18 分钟",
+      "KEEPALIVE_MINUTES = 18" in bc_src, "间隔常量不对")
+check("探活函数存在",
+      "async def _check_login_health" in bc_src, "缺少 _check_login_health")
+check("告警函数存在",
+      "async def _alert_relogin" in bc_src, "缺少 _alert_relogin")
+check("告警有冷却",
+      "RELOGIN_ALERT_COOLDOWN" in bc_src and "last_relogin_alert" in bc_src,
+      "告警冷却缺失")
+# 探活要在刷新之后调用角色接口
+_h_idx = bc_src.find("async def _check_login_health")
+_body = bc_src[_h_idx:_h_idx + 1200]
+check("探活先刷新再验证",
+      _body.find("refresh_ticket") < _body.find("get_role_info"),
+      "刷新与验证顺序不对")
+
+# 二维码超时必须明确回复（不能静默）
+val_src = (Path(__file__).resolve().parent.parent /
+           "venv" / "Lib" / "site-packages" / "nonebot_plugin_varolant" /
+           "matchers" / "val.py").read_text("utf-8")
+check("二维码过期有明确回复",
+      "二维码已过期或未在规定时间内扫码" in val_src, "仍是静默结束")
+
 # ---------- 汇总 ----------
 fails = [r for r in RESULTS if not r[1]]
 print()

@@ -52,6 +52,7 @@ def _load_state() -> Dict[str, Any]:
             legacy.update(str(i) for i in ids)
     s["global_reported"] = sorted(legacy)[-300:]
     s.setdefault("last_relogin_reminder", 0)
+    s.setdefault("last_relogin_alert", 0)
     return s
 
 
@@ -335,6 +336,100 @@ async def broadcast_once(bot: Optional[Bot] = None, return_count: bool = False,
         _save_state(state)
 
     return total_sent
+
+
+# ---------- 登录态保活与失效告警 ----------
+
+# WeGame 短票据（wt）约 30 分钟一换；在过期前主动续，避免懒刷新导致链条断掉
+KEEPALIVE_MINUTES = 18
+# 告警冷却：同一失效状态最多 4 小时喊一次，避免刷屏
+RELOGIN_ALERT_COOLDOWN = 4 * 3600
+
+_LOGIN_OK = True  # 进程内登录态标记，恢复后自动置 True
+
+
+async def _check_login_health() -> Tuple[bool, str]:
+    """探活：用最轻的角色接口验证票据；返回 (是否可用, 错误描述)。"""
+    from nonebot_plugin_varolant.core.wegame import WegameClient, WegameError
+
+    cfg = load_config()
+    qq = ""
+    for member in (cfg.get("members") or []):
+        if not member.get("subject"):
+            qq = str(member.get("qq") or "")
+            break
+    if not qq:
+        return False, "配置里没有主登录成员"
+    wg = await database.get_wegame_config(qq)
+    if not wg:
+        return False, "没有 WeGame 登录态"
+    client = WegameClient(dict(wg), account_key=qq)
+    try:
+        # 先尝试滚动刷新（正常情况票据会被续上）
+        try:
+            await client.refresh_ticket(force=False)
+        except Exception as e:  # noqa: BLE001 刷新失败不致命，用接口探活兜底
+            logger.debug(f"val_broadcaster: 票据刷新跳过: {type(e).__name__}: {e}")
+        await client.get_role_info()
+        return True, ""
+    except WegameError as e:
+        return False, str(e)
+    except Exception as e:  # noqa: BLE001
+        return False, f"{type(e).__name__}: {e}"
+    finally:
+        try:
+            await client.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+async def _alert_relogin(reason: str) -> None:
+    """往播报群发一条重登提示（带冷却）。"""
+    cfg = load_config()
+    group_id = int(cfg.get("group_id") or 0)
+    if not group_id:
+        return
+    state = _load_state()
+    now = int(time.time())
+    if now - int(state.get("last_relogin_alert") or 0) < RELOGIN_ALERT_COOLDOWN:
+        return
+    state["last_relogin_alert"] = now
+    _save_state(state)
+    try:
+        bots = nonebot.get_bots()
+        if not bots:
+            logger.warning("val_broadcaster: 没有已连接的 Bot，重登提醒发送失败")
+            return
+        bot = list(bots.values())[0]
+        await bot.send_group_msg(
+            group_id=group_id,
+            message=(
+                "⚠️ WeGame 登录态已失效，战绩播报暂停。\n"
+                f"原因：{reason}\n"
+                "在群里发「瓦登录」，扫一下二维码即可恢复。"
+            ),
+        )
+        logger.info(f"val_broadcaster: 已发送重登提醒（{reason}）")
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"val_broadcaster: 重登提醒发送失败: {type(e).__name__}: {e}")
+
+
+@scheduler.scheduled_job("interval", minutes=KEEPALIVE_MINUTES,
+                         id="val_broadcaster_keepalive",
+                         coalesce=True, max_instances=1, misfire_grace_time=120)
+async def _keepalive_job():
+    """每 18 分钟主动续一次票据；失效则喊人重登。"""
+    global _LOGIN_OK
+    ok, reason = await _check_login_health()
+    if not ok:
+        logger.warning(f"val_broadcaster: 登录态探活失败: {reason}")
+        if _LOGIN_OK:  # 由可用 → 失效，才喊一次
+            _LOGIN_OK = False
+            await _alert_relogin(reason)
+        return
+    if not _LOGIN_OK:
+        logger.info("val_broadcaster: 登录态已恢复")
+        _LOGIN_OK = True
 
 
 # ---------- 定时任务与指令 ----------
