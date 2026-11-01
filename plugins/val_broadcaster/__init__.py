@@ -382,6 +382,18 @@ async def _handle_poll(bot: Bot, event: MessageEvent, matcher: Matcher,
     def g(i: int) -> str:
         return str((groups[i] if len(groups) > i else None) or "").strip()
 
+    # 「瓦播报 个人信息 xxx」是瓦个人信息指令的误用，给出引导而非"名单里没找到"
+    raw_all = f"{g(2)}".strip()
+    if raw_all.startswith("个人信息") or raw_all == "个人信息":
+        who = raw_all.replace("个人信息", "", 1).strip()
+        if who:
+            await matcher.finish(
+                f"查个人数据请用「瓦个人信息 {who}」。\n"
+                "「瓦播报」用来发对局结算图。")
+        await matcher.finish(
+            "查个人数据请用「瓦个人信息」。\n"
+            "「瓦播报」用来发对局结算图。")
+
     is_comp = bool(g(0) or g(3))  # 组序：(comp_pre, num, name, comp)
     raw_num = g(1)
     raw_name = g(2)
