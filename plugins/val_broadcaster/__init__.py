@@ -224,6 +224,41 @@ def _list_member_names() -> List[str]:
 # ---------- 结算图播报 ----------
 
 
+async def _send_all_new_matches(bot: Bot, group_id: int,
+                                queue_id: str = "",
+                                member: Optional[Dict[str, Any]] = None,
+                                ) -> Tuple[int, str]:
+    """「瓦播报 新对局 [名字]」：播报上次播报之后的新对局。
+
+    不带名字 → 遍历全部成员；带名字 → 只播该成员。
+    与自动播报 broadcast_once 相同的去重逻辑（全局 matchId），
+    播完立即记账，单成员上限放宽到 15（接口上限），尽量不漏。
+    """
+    if member is not None:
+        members: List[Dict[str, Any]] = [member]
+    else:
+        members = load_config().get("members") or []
+    if not members:
+        return 0, "播报名单为空"
+    state = _load_state()
+    new_ids: List[str] = []
+    total = 0
+    for member in members:
+        sent, _note = await _send_settle_images(
+            bot, group_id, count=15, queue_id=queue_id,
+            member=member, only_new=True, mark_reported=False,
+            new_ids_out=new_ids)
+        total += sent
+    if new_ids:
+        state = _load_state()
+        seen = set(state.get("global_reported") or [])
+        seen.update(new_ids)
+        state["global_reported"] = sorted(seen)[-300:]
+        _save_state(state)
+    note = "" if total else "（最近的对局都已播过）"
+    return total, note
+
+
 async def _send_settle_images(
     bot: Bot, group_id: int, count: int, queue_id: str = "",
     member: Optional[Dict[str, Any]] = None,
@@ -488,6 +523,30 @@ async def _handle_poll(bot: Bot, event: MessageEvent, matcher: Matcher,
         await matcher.finish(
             "查个人数据请用「瓦个人信息」。\n"
             "「瓦播报」用来发对局结算图。")
+
+    # 「瓦播报 新对局 [名字]」= 播报上次播报之后的新对局
+    # 不带名字 → 全部成员（默认无畏契约大王优先）；带名字 → 只播该好友
+    if raw_all.startswith("新对局"):
+        extra_name = raw_all.replace("新对局", "", 1).strip()
+        new_member = None
+        if extra_name:
+            new_member = _pick_member(extra_name)
+            if new_member is None:
+                names_list = "、".join(_list_member_names()[:8])
+                await matcher.finish(
+                    f"播报名单里没找到「{extra_name}」。\n当前名单：{names_list}")
+        reply_group_new = getattr(event, "group_id", None)
+        if not reply_group_new:
+            await matcher.finish("瓦播报请在群里使用。")
+        scope_hint = f"{extra_name} 的" if extra_name else "所有成员的"
+        await matcher.send(f"正在检查{scope_hint}新对局，稍等…")
+        sent_n, note_n = await _send_all_new_matches(
+            bot, int(reply_group_new), member=new_member,
+            queue_id=COMPETITIVE if bool(g(0) or g(3)) else "")
+        if not sent_n:
+            await matcher.finish(
+                f"没有未播报的新对局。{note_n or '（最近的对局都已播过）'}")
+        return
 
     is_comp = bool(g(0) or g(3))  # 组序：(comp_pre, num, name, comp)
     raw_num = g(1)
