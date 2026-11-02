@@ -281,6 +281,24 @@ val_src = (Path(__file__).resolve().parent.parent /
 check("二维码过期有明确回复",
       "二维码已过期或未在规定时间内扫码" in val_src, "仍是静默结束")
 
+# ---------- 6. 瓦播报 新对局 ----------
+check("新对局指令分支存在",
+      "新对局" in bc_src and "_send_all_new_matches" in bc_src,
+      "缺少 新对局 分支或函数")
+_new_fn = (bc_src.split("async def _send_all_new_matches")[1]
+           .split("async def _send_settle_images")[0])
+check("新对局跨全部成员",
+      "for member in members" in _new_fn, "新对局没有遍历全部成员")
+check("新对局播完记账",
+      "_save_state" in _new_fn, "新对局播完没记账")
+check("新对局上限 15 场",
+      "count=15" in _new_fn, "新对局拉取上限不是 15")
+check("帮助含新对局用法",
+      "瓦播报 新对局" in
+      (Path(__file__).resolve().parent.parent / "plugins" / "val_info.py")
+      .read_text("utf-8"),
+      "帮助文本未更新")
+
 # ---------- 汇总 ----------
 fails = [r for r in RESULTS if not r[1]]
 print()
