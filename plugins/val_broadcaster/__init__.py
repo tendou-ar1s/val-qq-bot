@@ -333,14 +333,33 @@ async def _send_settle_images(
     return sent, note
 
 
+def _broadcast_groups(cfg: Dict[str, Any]) -> List[int]:
+    """取所有要自动播报的群：兼容旧 group_id + 新 group_ids 列表。"""
+    groups: List[int] = []
+    for g in (cfg.get("group_ids") or []):
+        try:
+            gi = int(g)
+            if gi and gi not in groups:
+                groups.append(gi)
+        except (TypeError, ValueError):
+            continue
+    try:
+        g1 = int(cfg.get("group_id") or 0)
+        if g1 and g1 not in groups:
+            groups.append(g1)
+    except (TypeError, ValueError):
+        pass
+    return groups
+
+
 async def broadcast_once(bot: Optional[Bot] = None, return_count: bool = False,
                          queue_id: str = ""):
-    """定时任务入口：对每个播报成员拉新对局，全局去重后发结算图。"""
+    """定时任务入口：对每个播报成员拉新对局，全局去重后发结算图（发到所有配置群）。"""
     cfg = load_config()
-    group_id = cfg.get("group_id") or 0
+    groups = _broadcast_groups(cfg)
     members: List[Dict[str, Any]] = cfg.get("members") or []
-    if not group_id or not members:
-        logger.info("val_broadcaster: group_id 或 members 未配置，跳过")
+    if not groups or not members:
+        logger.info("val_broadcaster: group_id/group_ids 或 members 未配置，跳过")
         return 0
 
     if bot is None:
@@ -357,11 +376,13 @@ async def broadcast_once(bot: Optional[Bot] = None, return_count: bool = False,
 
     for member in members:
         # 每个成员（主/好友）都只发"全局没播过"的对局——同局多人参与只播一次
-        sent, _note = await _send_settle_images(
-            bot, int(group_id), count=5, queue_id=queue_id,
-            member=member, only_new=True, mark_reported=False,
-            new_ids_out=new_ids)
-        total_sent += sent
+        # 同一场对局发到所有配置群（去重按 matchId，与群无关）
+        for gid in groups:
+            sent, _note = await _send_settle_images(
+                bot, gid, count=5, queue_id=queue_id,
+                member=member, only_new=True, mark_reported=False,
+                new_ids_out=new_ids)
+            total_sent += sent
 
     if total_sent:
         state = _load_state()
@@ -419,10 +440,10 @@ async def _check_login_health() -> Tuple[bool, str]:
 
 
 async def _alert_relogin(reason: str) -> None:
-    """往播报群发一条重登提示（带冷却）。"""
+    """往所有播报群发一条重登提示（带冷却）。"""
     cfg = load_config()
-    group_id = int(cfg.get("group_id") or 0)
-    if not group_id:
+    groups = _broadcast_groups(cfg)
+    if not groups:
         return
     state = _load_state()
     now = int(time.time())
@@ -436,15 +457,19 @@ async def _alert_relogin(reason: str) -> None:
             logger.warning("val_broadcaster: 没有已连接的 Bot，重登提醒发送失败")
             return
         bot = list(bots.values())[0]
-        await bot.send_group_msg(
-            group_id=group_id,
-            message=(
-                "⚠️ WeGame 登录态已失效，战绩播报暂停。\n"
-                f"原因：{reason}\n"
-                "在群里发「瓦登录」，扫一下二维码即可恢复。"
-            ),
-        )
-        logger.info(f"val_broadcaster: 已发送重登提醒（{reason}）")
+        for group_id in groups:
+            try:
+                await bot.send_group_msg(
+                    group_id=group_id,
+                    message=(
+                        "⚠️ WeGame 登录态已失效，战绩播报暂停。\n"
+                        f"原因：{reason}\n"
+                        "在群里发「瓦登录」，扫一下二维码即可恢复。"
+                    ),
+                )
+            except Exception as e:  # noqa: BLE001 单群失败不影响其他群
+                logger.warning(f"val_broadcaster: 重登提醒发送到群 {group_id} 失败: {type(e).__name__}: {e}")
+        logger.info(f"val_broadcaster: 已发送重登提醒到 {len(groups)} 个群（{reason}）")
     except Exception as e:  # noqa: BLE001
         logger.warning(f"val_broadcaster: 重登提醒发送失败: {type(e).__name__}: {e}")
 

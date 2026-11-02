@@ -299,6 +299,24 @@ check("帮助含新对局用法",
       .read_text("utf-8"),
       "帮助文本未更新")
 
+# ---------- 7. 多群播报 ----------
+cfg_multi = json.loads((Path(__file__).resolve().parent.parent /
+                        "config.json").read_text("utf-8"))
+check("config 含 group_ids 多群列表",
+      isinstance(cfg_multi.get("group_ids"), list)
+      and len(cfg_multi["group_ids"]) >= 2,
+      f"group_ids: {cfg_multi.get('group_ids')}")
+check("旧 group_id 仍在（兼容）",
+      bool(cfg_multi.get("group_id")), "group_id 缺失")
+check("broadcast_once 遍历多群",
+      "for gid in groups" in bc_src, "broadcast_once 未遍历多群")
+check("告警发多群",
+      bc_src.split("async def _alert_relogin")[1]
+      .split("# ---------- 定时任务与指令")[0]
+      .count("send_group_msg") >= 1 and
+      "for group_id in groups" in bc_src.split("async def _alert_relogin")[1],
+      "告警未遍历多群")
+
 # ---------- 汇总 ----------
 fails = [r for r in RESULTS if not r[1]]
 print()
