@@ -288,17 +288,17 @@ async def _send_settle_images(
     state = _load_state()
     state_key = str(member.get("subject") or member.get("qq") or "main")
     global_seen = set(state.get("global_reported") or [])
-    # 本次运行内已发送的对局（跨成员去重：同局在状态记账前就被第二个成员拉到时不再重发）
-    if new_ids_out:
-        global_seen.update(new_ids_out)
+    # 本次运行内已发送的对局（跨成员去重）：只记本群本次已发的（sent_this_group），
+    # 不把 new_ids_out（其它群已发的）并入——同场对局每个群都要各发一份。
     sent = 0
     skipped_dup = 0
+    sent_this_group: set = set()
 
     # 时间倒序
     rows = sorted(rows, key=_start_ms, reverse=True)[:count]
     for row in rows:
         mid = _match_id(row)
-        if only_new and mid in global_seen:
+        if only_new and (mid in global_seen or mid in sent_this_group):
             skipped_dup += 1
             continue
         try:
@@ -322,6 +322,7 @@ async def _send_settle_images(
             ]))
             sent += 1
             global_seen.add(mid)
+            sent_this_group.add(mid)
             if new_ids_out is not None:
                 new_ids_out.append(mid)
         except Exception as e:
@@ -373,13 +374,12 @@ async def broadcast_once(bot: Optional[Bot] = None, return_count: bool = False,
         bot = bots[0]
 
     state = _load_state()
-    global_seen = set(state.get("global_reported") or [])
     total_sent = 0
-    new_ids: List[str] = []
+    new_ids: List[str] = []       # 全局记账用（群无关，去重记账仍按 matchId）
 
     for member in members:
         # 每个成员（主/好友）都只发"全局没播过"的对局——同局多人参与只播一次
-        # 同一场对局发到所有配置群（去重按 matchId，与群无关）
+        # 同一场对局发到所有配置群（每个群独立一份图；群间不互相去重）
         for gid in groups:
             sent, _note = await _send_settle_images(
                 bot, gid, count=5, queue_id=queue_id,
