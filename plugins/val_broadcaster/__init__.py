@@ -288,6 +288,9 @@ async def _send_settle_images(
     state = _load_state()
     state_key = str(member.get("subject") or member.get("qq") or "main")
     global_seen = set(state.get("global_reported") or [])
+    # 本次运行内已发送的对局（跨成员去重：同局在状态记账前就被第二个成员拉到时不再重发）
+    if new_ids_out:
+        global_seen.update(new_ids_out)
     sent = 0
     skipped_dup = 0
 
