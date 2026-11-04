@@ -497,11 +497,12 @@ async def _keepalive_job():
 
 # ---------- 定时任务与指令 ----------
 
-
-@scheduler.scheduled_job("interval", minutes=30, id="val_broadcaster_poll",
-                         coalesce=True, max_instances=1, misfire_grace_time=300)
-async def _poll_job():
-    await broadcast_once()
+# 旧版"结算图轮询自动播报"已下线（需求变更：改为每日排位战报，见 plugins/val_daily.py）。
+# broadcast_once 保留供手动「瓦播报 新对局」使用。
+# @scheduler.scheduled_job("interval", minutes=30, id="val_broadcaster_poll",
+#                          coalesce=True, max_instances=1, misfire_grace_time=300)
+# async def _poll_job():
+#     await broadcast_once()
 
 
 _CN_DIGITS = {
