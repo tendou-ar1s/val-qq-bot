@@ -11,7 +11,7 @@
 
 import json
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -31,7 +31,7 @@ from nonebot_plugin_varolant.core.battle_render import render_battle_detail
 CONFIG_PATH = Path(__file__).resolve().parent.parent.parent / "config.json"
 DATA_PATH = Path(__file__).resolve().parent / "data"
 DAILY_STATE = DATA_PATH / "daily_state.json"
-TZ_OFFSET_H = 8  # Asia/Shanghai
+_TZ = timezone(timedelta(hours=8))  # Asia/Shanghai
 
 COMPETITIVE = "competitive"
 
@@ -59,12 +59,11 @@ def _save_daily(state: Dict[str, Any]) -> None:
 
 
 def _today_str() -> str:
-    return datetime.utcnow().astimezone(timedelta(hours=TZ_OFFSET_H)).strftime("%Y-%m-%d")
+    return datetime.now(_TZ).strftime("%Y-%m-%d")
 
 
 def _start_of_today_ms() -> int:
-    d = datetime.utcnow().astimezone(timedelta(hours=TZ_OFFSET_H))
-    d0 = d.replace(hour=0, minute=0, second=0, microsecond=0)
+    d0 = datetime.now(_TZ).replace(hour=0, minute=0, second=0, microsecond=0)
     return int(d0.timestamp() * 1000)
 
 
