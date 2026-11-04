@@ -408,7 +408,11 @@ _LOGIN_OK = True  # 进程内登录态标记，恢复后自动置 True
 
 
 async def _check_login_health() -> Tuple[bool, str]:
-    """探活：用最轻的角色接口验证票据；返回 (是否可用, 错误描述)。"""
+    """探活：用最轻的角色接口验证票据；返回 (是否可用, 错误描述)。
+
+    探活失败时立刻强刷一次并（若仍失败）触发免扫码重签，
+    避免"票据提前失效、但 next_refresh_at 还没到"导致白等一个刷新周期。
+    """
     from nonebot_plugin_varolant.core.wegame import WegameClient, WegameError
 
     cfg = load_config()
@@ -424,17 +428,39 @@ async def _check_login_health() -> Tuple[bool, str]:
         return False, "没有 WeGame 登录态"
     client = WegameClient(dict(wg), account_key=qq)
     try:
-        # 先尝试滚动刷新（正常情况票据会被续上）
+        # 1) 到点则滚动刷新（正常情况票据会被续上）
         try:
             await client.refresh_ticket(force=False)
         except Exception as e:  # noqa: BLE001 刷新失败不致命，用接口探活兜底
             logger.debug(f"val_broadcaster: 票据刷新跳过: {type(e).__name__}: {e}")
-        await client.get_role_info()
-        return True, ""
-    except WegameError as e:
-        return False, str(e)
-    except Exception as e:  # noqa: BLE001
-        return False, f"{type(e).__name__}: {e}"
+        try:
+            await client.get_role_info()
+            return True, ""
+        except Exception as first_err:  # noqa: BLE001 探活失败 → 立刻强刷
+            logger.info(f"val_broadcaster: 探活失败（{first_err}），立即强制刷新票据")
+        # 2) 强刷一次（忽略 next_refresh_at）
+        try:
+            ok = await client.refresh_ticket(force=True)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"val_broadcaster: 强制刷新异常: {type(e).__name__}: {e}")
+            ok = False
+        # refresh_ticket 内部遇到票据作废会自动走 _auto_relogin，因此这里重新探活
+        fresh = await database.get_wegame_config(qq) or wg
+        if ok or fresh.get("auth_refreshed_at") != wg.get("auth_refreshed_at"):
+            probe = WegameClient(dict(fresh), account_key=qq)
+            try:
+                await probe.get_role_info()
+                return True, ""
+            except WegameError as e:
+                return False, str(e)
+            except Exception as e:  # noqa: BLE001
+                return False, f"{type(e).__name__}: {e}"
+            finally:
+                try:
+                    await probe.close()
+                except Exception:  # noqa: BLE001
+                    pass
+        return False, "票据刷新失败"
     finally:
         try:
             await client.close()

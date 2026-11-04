@@ -9,6 +9,7 @@
   评分并列时：最高局取击败数更高者，最低局取击败数更低者。
 """
 
+import asyncio
 import json
 import time
 from datetime import datetime, timedelta, timezone
@@ -86,6 +87,26 @@ def _int(v: Any, d: int = 0) -> int:
         return d
 
 
+# ---------- 带重试的接口调用 ----------
+
+RETRY_TIMES = 3
+RETRY_SLEEP = 1.5
+
+
+async def _retry(coro_factory, what: str):
+    """WeGame 接口偶发 RequestFail / not allow access，重试几次再放弃。"""
+    last: Optional[Exception] = None
+    for i in range(RETRY_TIMES):
+        try:
+            return await coro_factory()
+        except Exception as e:  # noqa: BLE001
+            last = e
+            if i + 1 < RETRY_TIMES:
+                await asyncio.sleep(RETRY_SLEEP * (i + 1))
+    logger.warning(f"val_daily: {what} 重试 {RETRY_TIMES} 次仍失败: {last}")
+    raise last  # type: ignore[misc]
+
+
 # ---------- 数据收集 ----------
 
 
@@ -99,15 +120,20 @@ async def _get_main_client() -> Optional[WegameClient]:
     return None
 
 
-async def _collect_one_day() -> Tuple[List[Dict[str, Any]], str]:
-    """收集所有成员今日竞技对局的个人汇总。返回 (entries, err)。
+async def _collect_one_day() -> Tuple[List[Dict[str, Any]], str,
+                                     List[str], List[str]]:
+    """收集所有成员今日竞技对局的个人汇总。
+
+    返回 (entries, err, failed, degraded)：
+    - failed: 列表都没拉到的成员名（完全不计数）
+    - degraded: detail 拉取失败、用列表数据兜底计数的成员名
 
     entry = {name, matches: n, wins, acs, kills, deaths, assists,
-             best: {score, kills, ...}, worst: {...}}
+             best: {...}, worst: {...}}
     """
     client = await _get_main_client()
     if not client:
-        return [], "没有 WeGame 登录，请先发「瓦登录」。"
+        return [], "没有 WeGame 登录，请先发「瓦登录」。", [], []
     today0 = _start_of_today_ms()
     try:
         role = await client.resolve_own_subject()
@@ -123,15 +149,20 @@ async def _collect_one_day() -> Tuple[List[Dict[str, Any]], str]:
                 targets.append((my_subject, str(role.name or m.get("note") or "")))
         seen_subj = set()
         entries: List[Dict[str, Any]] = []
+        failed: List[str] = []
+        degraded: List[str] = []
         for subj, name in targets:
             if not subj or subj in seen_subj:
                 continue
             seen_subj.add(subj)
             try:
-                rows = await client.get_battle_list(subj, size=15,
-                                                    queue_id=COMPETITIVE)
-            except WegameError as e:
+                rows = await _retry(
+                    lambda: client.get_battle_list(subj, size=15,
+                                                   queue_id=COMPETITIVE),
+                    f"{name} 拉对局")
+            except Exception as e:  # noqa: BLE001
                 logger.warning(f"val_daily: {name} 拉对局失败: {e}")
+                failed.append(name)
                 continue
             today_rows = [r for r in (rows or []) if _start_ms(r) >= today0]
             if not today_rows:
@@ -139,9 +170,16 @@ async def _collect_one_day() -> Tuple[List[Dict[str, Any]], str]:
             per: List[Dict[str, Any]] = []
             for r in today_rows:
                 try:
-                    d = await client.get_battle_detail(r.get("apEventId"), subj)
-                except WegameError as e:
+                    d = await _retry(
+                        lambda: client.get_battle_detail(r.get("apEventId"), subj),
+                        f"{name} 拉 detail")
+                except Exception as e:  # noqa: BLE001
                     logger.warning(f"val_daily: {name} 拉 detail 失败: {e}")
+                    # 兜底：用列表行自带的统计补上这一局（少一个局也不能丢整场）
+                    fb = _fallback_from_row(r)
+                    if fb:
+                        per.append(fb)
+                        degraded.append(name)
                     continue
                 bd = (d.get("battle_detail") or {})
                 me = next((p for p in (bd.get("players") or [])
@@ -183,21 +221,43 @@ async def _collect_one_day() -> Tuple[List[Dict[str, Any]], str]:
                 "worst": worst,
             })
         entries.sort(key=lambda e: -e["acs"])
-        return entries, ""
+        return entries, "", failed, degraded
     finally:
         await client.close()
+
+
+def _fallback_from_row(row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """detail 拉不到时，用列表行里的统计兜底，保证场次不少算。"""
+    kills = _int(row.get("statsKills") or row.get("kill"))
+    deaths = _int(row.get("statsDeaths") or row.get("dead"))
+    assists = _int(row.get("statsAssists") or row.get("assist"))
+    if kills == 0 and deaths == 0 and assists == 0:
+        return None
+    score_total = _int(row.get("statsScore"))
+    rounds = _int(row.get("statsRoundsPlayed") or row.get("roundsPlayed"))
+    round_won = _int(row.get("roundsWon"))
+    round_lost = max(rounds - round_won, 0)
+    return {
+        "match_id": str(row.get("matchId") or row.get("apEventId") or ""),
+        "perf": _int(row.get("performanceScore") or row.get("game_plus")
+                     or row.get("statsScore")),
+        "kills": kills,
+        "deaths": deaths,
+        "assists": assists,
+        "score_total": score_total,
+        "rounds": rounds,
+        "won": _int(row.get("wonMatch")) == 1,
+        "round_score": f"{round_won}:{round_lost}",
+        "approx": True,
+    }
 
 
 # ---------- 渲染 ----------
 
 
-def _fmt_match(p: Dict[str, Any]) -> str:
-    win = "胜" if p["won"] else "负"
-    return (f"{p['perf']}分 {win} {p['round_score']} "
-            f"{p['kills']}/{p['deaths']}/{p['assists']}")
-
-
-def _render_report(entries: List[Dict[str, Any]], date_str: str) -> str:
+def _render_report(entries: List[Dict[str, Any]], date_str: str,
+                   failed: Optional[List[str]] = None,
+                   degraded: Optional[List[str]] = None) -> str:
     if not entries:
         return f"📊 {date_str} 瓦战报\n今天没有人打排位。"
     lines = [f"📊 {date_str} 排位战报（按本日 ACS 排名）", ""]
@@ -205,15 +265,29 @@ def _render_report(entries: List[Dict[str, Any]], date_str: str) -> str:
     for i, e in enumerate(entries):
         head = medal[i] if i < 3 else f"{i + 1}."
         kda = f"{e['kills']}/{e['deaths']}/{e['assists']}"
-        lines.append(
-            f"{head} {e['name']}\n"
-            f"    本日 ACS {e['acs']} ｜ {e['matches']}场 {e['wins']}胜 ｜ 击败/被击败/助攻 {kda}"
-        )
-        lines.append(f"    🔺 最高评分：{_fmt_match(e['best'])}")
-        lines.append(f"    🔻 最低评分：{_fmt_match(e['worst'])}")
-    lines.append("")
-    lines.append("（仅统计排位对局 · ACS=战斗得分/回合数）")
+        block = [
+            f"{head} {e['name']}",
+            f"    本日 ACS {e['acs']} ｜ {e['matches']}场 {e['wins']}胜 ｜ 击败/被击败/助攻 {kda}",
+            f"    🔺 最高评分：{_fmt_match(e['best'])}",
+            f"    🔻 最低评分：{_fmt_match(e['worst'])}",
+        ]
+        lines.extend(block)
+        # 不同人的信息之间空一行
+        lines.append("")
+    tail = "（仅统计排位对局 · ACS=战斗得分/回合数）"
+    if degraded:
+        tail += "\n※ " + "、".join(degraded) + " 有对局详情拉取失败，已按列表数据计入"
+    if failed:
+        tail += "\n※ " + "、".join(failed) + " 的数据获取失败，未计入本次战报"
+    lines.append(tail)
     return "\n".join(lines)
+
+
+def _fmt_match(p: Dict[str, Any]) -> str:
+    win = "胜" if p["won"] else "负"
+    approx = "（约）" if p.get("approx") else ""
+    return (f"{p['perf']}分{approx} {win} {p['round_score']} "
+            f"{p['kills']}/{p['deaths']}/{p['assists']}")
 
 
 # ---------- 播报 ----------
@@ -235,12 +309,12 @@ async def _send_daily_report(bot: Bot, manual: bool) -> int:
     """收集并播报今日战报到所有群。返回发送群数。"""
     today = _today_str()
     state = _load_daily()
-    entries, err = await _collect_one_day()
+    entries, err, failed, degraded = await _collect_one_day()
     if err:
         logger.warning(f"val_daily: 收集失败 {err}")
         await _notify_groups(bot, f"⚠️ 今日瓦战报生成失败：{err}")
         return 0
-    text = _render_report(entries, today)
+    text = _render_report(entries, today, failed, degraded)
     sent = 0
     for gid in _daily_groups(load_config()):
         try:
@@ -290,35 +364,50 @@ async def _daily_job():
 daily_cmd = on_regex(r"^瓦战报\s*$", priority=8, block=True)
 
 
+_MANUAL_LOCK: Optional[asyncio.Lock] = None
+
+
+def _manual_lock() -> asyncio.Lock:
+    global _MANUAL_LOCK
+    if _MANUAL_LOCK is None:
+        _MANUAL_LOCK = asyncio.Lock()
+    return _MANUAL_LOCK
+
+
 @daily_cmd.handle()
 async def _handle_daily(bot: Bot, event: MessageEvent, matcher: Matcher):
-    # 异步收集，避免阻塞
-    import asyncio
+    # 异步收集，避免阻塞；同一时刻只允许一个收集在跑
     matcher.stop_propagation()
+    lock = _manual_lock()
+    if lock.locked():
+        await bot.send(event, Message("📊 正在收集上一次战报，请稍候…"))
+        return
     await bot.send(event, Message("📊 正在收集今日排位战绩，请稍候…"))
     asyncio.create_task(_manual_report_task(bot, int(event.group_id)))
 
 
 async def _manual_report_task(bot: Bot, group_id: int):
-    try:
-        entries, err = await _collect_one_day()
-        if err:
-            await bot.send_group_msg(group_id=group_id,
-                                     message=Message(f"⚠️ 收集失败：{err}"))
-            return
-        today = _today_str()
-        text = _render_report(entries, today)
-        await bot.send_group_msg(group_id=group_id, message=Message(text))
-        state = _load_daily()
-        state["last_report_date"] = today
-        state["last_report_manual"] = True
-        state["last_entries"] = entries
-        _save_daily(state)
-        logger.info(f"val_daily: 手动播报完成（{group_id}，{len(entries)} 人）")
-    except Exception as e:
-        logger.error(f"val_daily: 手动播报异常 {type(e).__name__}: {e}")
+    lock = _manual_lock()
+    async with lock:
         try:
-            await bot.send_group_msg(group_id=group_id,
-                                     message=Message(f"⚠️ 播报异常：{e}"))
-        except Exception:
-            pass
+            entries, err, failed, degraded = await _collect_one_day()
+            if err:
+                await bot.send_group_msg(group_id=group_id,
+                                         message=Message(f"⚠️ 收集失败：{err}"))
+                return
+            today = _today_str()
+            text = _render_report(entries, today, failed, degraded)
+            await bot.send_group_msg(group_id=group_id, message=Message(text))
+            state = _load_daily()
+            state["last_report_date"] = today
+            state["last_report_manual"] = True
+            state["last_entries"] = entries
+            _save_daily(state)
+            logger.info(f"val_daily: 手动播报完成（{group_id}，{len(entries)} 人）")
+        except Exception as e:
+            logger.error(f"val_daily: 手动播报异常 {type(e).__name__}: {e}")
+            try:
+                await bot.send_group_msg(group_id=group_id,
+                                         message=Message(f"⚠️ 播报异常：{e}"))
+            except Exception:
+                pass
