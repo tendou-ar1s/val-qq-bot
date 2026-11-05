@@ -367,15 +367,16 @@ async def _refresh_qq_sig_from_napcat(bot: Bot) -> bool:
     try:
         raw = await bot.call_api("get_cookies", domain="qq.com")
     except Exception as e:  # noqa: BLE001 NapCat 未实现/参数差异
-        logger.debug(f"val_daily: get_cookies(qq.com) 失败: {type(e).__name__}: {e}")
+        logger.warning(f"val_daily: get_cookies(qq.com) 失败: {type(e).__name__}: {e}")
         return False
     cookie = raw.get("cookies") if isinstance(raw, dict) else str(raw or "")
     if not cookie:
+        logger.warning(f"val_daily: get_cookies 返回空: {str(raw)[:120]}")
         return False
     text = str(cookie)
     sig = _parse_cookie_value(text, "p_skey") or _parse_cookie_value(text, "pskey")
     if not sig:
-        logger.debug("val_daily: get_cookies 里没有 p_skey/pskey")
+        logger.warning(f"val_daily: get_cookies 里没有 p_skey/pskey: {text[:150]}")
         return False
     uin = _parse_cookie_value(text, "p_uin") or _parse_cookie_value(text, "uin")
     uin = uin.lstrip("o0") or str(load_config().get("members", [{}])[0].get("qq", ""))
