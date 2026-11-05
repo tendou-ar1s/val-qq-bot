@@ -1,11 +1,14 @@
 # -*- coding: utf-8 -*-
-"""val_daily: 每日排位战绩汇总播报。
+"""val_daily: 排位战绩汇总播报。
 
-- 每日 12:00 自动汇总：瓦列表好友中，今日打过排位（competitive）的人，
-  统计本日 ACS、总击败/被击败/助攻、评分最高与最低的一局，按本日 ACS 排成排行榜。
-- 手动指令「瓦战报」：立即收集播报；手动播报后当日不再自动播。
-- 只统计排位对局；没打过排位的人不提及。
-- 评分 = WeGame 表现评分（performanceScore）；ACS = 本日总战术得分 / 总回合数。
+- 播报日定义：凌晨 4:00 到次日 4:00（凌晨 4 点前算前一天）。
+- 每日 04:05 自动播报"上一个播报日"（昨天 04:00 → 今天 04:00）的战报。
+- 手动指令「瓦战报 [日期]」：日期可选，默认最近一个播报日。
+  支持：瓦战报 今天 / 昨天 / 前天 / 11-05 / 2026-11-05 / 3（= 三天前）。
+  最近 7 天内均可查。
+- 统计窗口内打过排位（competitive）的人：本窗口 ACS、总击败/被击败/助攻、
+  评分最高与最低的一局，按 ACS 排成排行榜；没打的成员不提及。
+- 评分 = WeGame 表现评分（performanceScore）；ACS = 战斗总得分 / 总回合数。
   评分并列时：最高局取击败数更高者，最低局取击败数更低者。
 """
 
@@ -63,9 +66,85 @@ def _today_str() -> str:
     return datetime.now(_TZ).strftime("%Y-%m-%d")
 
 
-def _start_of_today_ms() -> int:
-    d0 = datetime.now(_TZ).replace(hour=0, minute=0, second=0, microsecond=0)
-    return int(d0.timestamp() * 1000)
+def _window_start(d: datetime) -> datetime:
+    """凌晨 4 点起算的"播报日"起点：4 点前属于前一天。"""
+    d0 = d.replace(minute=0, second=0, microsecond=0)
+    if d0.hour < 4:
+        d0 = d0 - timedelta(days=1)
+    return d0.replace(hour=4)
+
+
+def _window_for_offset(days_back: int) -> Dict[str, Any]:
+    """取 days_back 天前的播报日窗口 [start_ms, end_ms)。
+
+    offset=0 → 最近一个完整+进行中的窗口（今天 04:00 起），
+    offset=1 → 昨天 04:00 到今天 04:00。
+    """
+    now = datetime.now(_TZ)
+    cur_start = _window_start(now)
+    start = cur_start - timedelta(days=days_back)
+    end = start + timedelta(days=1)
+    return {
+        "offset_days": days_back,
+        "label": start.strftime("%m-%d") + " 04:00 ~ " + end.strftime("%m-%d 04:00"),
+        "start_ms": int(start.timestamp() * 1000),
+        "end_ms": int(end.timestamp() * 1000),
+        "date_str": start.strftime("%Y-%m-%d"),
+    }
+
+
+_WORD_MAP = {"今天": 0, "今日": 0, "昨天": 1, "昨日": 1, "前天": 2, "前日": 2}
+
+
+def _parse_date_arg(arg: str) -> Tuple[Optional[Dict[str, Any]], str]:
+    """解析「瓦战报 [日期]」的日期参数。
+
+    支持：空（默认最近窗口）、今天/昨天/前天、MM-DD、YYYY-MM-DD、数字（几天前）。
+    返回 (window, err)，err 非空表示参数无效。
+    """
+    arg = (arg or "").strip()
+    if not arg:
+        return _window_for_offset(0), ""
+    # 中文相对词
+    if arg in _WORD_MAP:
+        return _window_for_offset(_WORD_MAP[arg]), ""
+    # 纯数字 = 几天前（1 = 昨天）
+    if arg.isdigit():
+        n = int(arg)
+        if 0 <= n <= 7:
+            return _window_for_offset(n), ""
+        return None, "日期范围只支持最近 7 天"
+    # MM-DD 或 YYYY-MM-DD
+    m = None
+    import re as _re
+    m = _re.fullmatch(r"(\d{1,2})-(\d{1,2})", arg)
+    if m:
+        try:
+            target = datetime.now(_TZ).replace(month=int(m.group(1)),
+                                               day=int(m.group(2)))
+        except ValueError:
+            return None, f"日期无效：{arg}"
+    else:
+        m = _re.fullmatch(r"(\d{4})-(\d{1,2})-(\d{1,2})", arg)
+        if m:
+            try:
+                target = datetime(int(m.group(1)), int(m.group(2)),
+                                  int(m.group(3)), tzinfo=_TZ)
+            except ValueError:
+                return None, f"日期无效：{arg}"
+        else:
+            return None, ("日期格式：瓦战报 / 瓦战报 昨天 / 瓦战报 11-05 / "
+                          "瓦战报 2026-11-05 / 瓦战报 3（三天前）")
+    # 换算成窗口偏移
+    now = datetime.now(_TZ)
+    cur_start = _window_start(now)
+    tgt_start = _window_start(target)
+    delta = (cur_start.date() - tgt_start.date()).days
+    if delta < 0:
+        return None, "不能查询未来的日期"
+    if delta > 7:
+        return None, "日期范围只支持最近 7 天（WeGame 接口最多返回 15 场，太久远的查不全）"
+    return _window_for_offset(delta), ""
 
 
 def _start_ms(row: Dict[str, Any]) -> int:
@@ -120,9 +199,11 @@ async def _get_main_client() -> Optional[WegameClient]:
     return None
 
 
-async def _collect_one_day() -> Tuple[List[Dict[str, Any]], str,
-                                     List[str], List[str]]:
-    """收集所有成员今日竞技对局的个人汇总。
+async def _collect_window(win: Dict[str, Any]) -> Tuple[List[Dict[str, Any]],
+                                                        str,
+                                                        List[str],
+                                                        List[str]]:
+    """收集所有成员在 win 窗口 [start_ms, end_ms) 内的竞技对局汇总。
 
     返回 (entries, err, failed, degraded)：
     - failed: 列表都没拉到的成员名（完全不计数）
@@ -134,7 +215,8 @@ async def _collect_one_day() -> Tuple[List[Dict[str, Any]], str,
     client = await _get_main_client()
     if not client:
         return [], "没有 WeGame 登录，请先发「瓦登录」。", [], []
-    today0 = _start_of_today_ms()
+    win_start = int(win["start_ms"])
+    win_end = int(win["end_ms"])
     try:
         role = await client.resolve_own_subject()
         my_subject = role.subject
@@ -164,11 +246,13 @@ async def _collect_one_day() -> Tuple[List[Dict[str, Any]], str,
                 logger.warning(f"val_daily: {name} 拉对局失败: {e}")
                 failed.append(name)
                 continue
-            today_rows = [r for r in (rows or []) if _start_ms(r) >= today0]
-            if not today_rows:
+            # 窗口过滤：start >= win_start 且 start < win_end
+            win_rows = [r for r in (rows or [])
+                        if win_start <= _start_ms(r) < win_end]
+            if not win_rows:
                 continue
             per: List[Dict[str, Any]] = []
-            for r in today_rows:
+            for r in win_rows:
                 try:
                     d = await _retry(
                         lambda: client.get_battle_detail(r.get("apEventId"), subj),
@@ -305,16 +389,16 @@ def _daily_groups(cfg: Dict[str, Any]) -> List[int]:
     return groups
 
 
-async def _send_daily_report(bot: Bot, manual: bool) -> int:
-    """收集并播报今日战报到所有群。返回发送群数。"""
-    today = _today_str()
+async def _send_window_report(bot: Bot, win: Dict[str, Any],
+                              manual: bool = False) -> int:
+    """收集并播报指定窗口的战报到所有群。返回发送群数。"""
     state = _load_daily()
-    entries, err, failed, degraded = await _collect_one_day()
+    entries, err, failed, degraded = await _collect_window(win)
     if err:
         logger.warning(f"val_daily: 收集失败 {err}")
-        await _notify_groups(bot, f"⚠️ 今日瓦战报生成失败：{err}")
+        await _notify_groups(bot, f"⚠️ 瓦战报生成失败：{err}")
         return 0
-    text = _render_report(entries, today, failed, degraded)
+    text = _render_report(entries, win["label"], failed, degraded)
     sent = 0
     for gid in _daily_groups(load_config()):
         try:
@@ -323,11 +407,10 @@ async def _send_daily_report(bot: Bot, manual: bool) -> int:
         except Exception as e:
             logger.error(f"val_daily: 发送到群 {gid} 失败: {e}")
     if sent:
-        state["last_report_date"] = today
-        state["last_report_manual"] = manual
+        state["last_report_date"] = win["label"]
         state["last_entries"] = entries
         _save_daily(state)
-        logger.info(f"val_daily: {today} 战报已发 {sent} 个群（manual={manual}，{len(entries)} 人上榜）")
+        logger.info(f"val_daily: {win['label']} 战报已发 {sent} 个群（{len(entries)} 人上榜）")
     return sent
 
 
@@ -339,29 +422,22 @@ async def _notify_groups(bot: Bot, text: str) -> None:
             pass
 
 
-def _should_auto_report() -> bool:
-    state = _load_daily()
-    if state.get("last_report_date") != _today_str():
-        return True
-    return not state.get("last_report_manual", False)
-
-
 # ---------- 定时任务与指令 ----------
 
-# 每日 12:00 自动播报（手动播过则跳过）
-@scheduler.scheduled_job("cron", hour=12, minute=0, id="val_daily_report")
+# 每日 04:05 自动播报"上一个播报日"（04:00→次日04:00）的战报
+# （凌晨 4 点清贫的玩家基本都睡了，此时播昨天的总结最合理）
+@scheduler.scheduled_job("cron", hour=4, minute=5, id="val_daily_report")
 async def _daily_job():
-    if not _should_auto_report():
-        logger.info("val_daily: 今日已手动播报，跳过自动播报")
-        return
     bots = [b for b in nonebot.get_bots().values() if isinstance(b, Bot)]
     if not bots:
         logger.warning("val_daily: 无已连接 Bot，跳过")
         return
-    await _send_daily_report(bots[0], manual=False)
+    # 播报窗口 = 昨天凌晨 4 点到今天凌晨 4 点
+    win = _window_for_offset(1)
+    await _send_window_report(bots[0], win, manual=False)
 
 
-daily_cmd = on_regex(r"^瓦战报\s*$", priority=8, block=True)
+daily_cmd = on_regex(r"^瓦战报(?:\s+(.+))?\s*$", priority=8, block=True)
 
 
 _MANUAL_LOCK: Optional[asyncio.Lock] = None
@@ -375,35 +451,41 @@ def _manual_lock() -> asyncio.Lock:
 
 
 @daily_cmd.handle()
-async def _handle_daily(bot: Bot, event: MessageEvent, matcher: Matcher):
-    # 异步收集，避免阻塞；同一时刻只允许一个收集在跑
+async def _handle_daily(bot: Bot, event: MessageEvent, matcher: Matcher,
+                        args: Tuple[Any, ...] = RegexGroup()):
     matcher.stop_propagation()
+    arg = (str(args[0]).strip() if args and args[0] else "")
+    win, date_err = _parse_date_arg(arg)
+    if date_err:
+        await bot.send(event, Message(f"⚠️ {date_err}"))
+        return
     lock = _manual_lock()
     if lock.locked():
         await bot.send(event, Message("📊 正在收集上一次战报，请稍候…"))
         return
-    await bot.send(event, Message("📊 正在收集今日排位战绩，请稍候…"))
-    asyncio.create_task(_manual_report_task(bot, int(event.group_id)))
+    await bot.send(event, Message(f"📊 正在收集{win['label']}排位战绩，请稍候…"))
+    asyncio.create_task(_manual_report_task(bot, int(event.group_id), win))
 
 
-async def _manual_report_task(bot: Bot, group_id: int):
+async def _manual_report_task(bot: Bot, group_id: int,
+                              win: Optional[Dict[str, Any]] = None):
     lock = _manual_lock()
     async with lock:
         try:
-            entries, err, failed, degraded = await _collect_one_day()
+            if win is None:
+                win = _window_for_offset(0)
+            entries, err, failed, degraded = await _collect_window(win)
             if err:
                 await bot.send_group_msg(group_id=group_id,
                                          message=Message(f"⚠️ 收集失败：{err}"))
                 return
-            today = _today_str()
-            text = _render_report(entries, today, failed, degraded)
+            text = _render_report(entries, win["label"], failed, degraded)
             await bot.send_group_msg(group_id=group_id, message=Message(text))
             state = _load_daily()
-            state["last_report_date"] = today
-            state["last_report_manual"] = True
+            state["last_report_date"] = win["label"]
             state["last_entries"] = entries
             _save_daily(state)
-            logger.info(f"val_daily: 手动播报完成（{group_id}，{len(entries)} 人）")
+            logger.info(f"val_daily: 手动播报完成（{group_id}，{win['label']}，{len(entries)} 人）")
         except Exception as e:
             logger.error(f"val_daily: 手动播报异常 {type(e).__name__}: {e}")
             try:
@@ -411,11 +493,3 @@ async def _manual_report_task(bot: Bot, group_id: int):
                                          message=Message(f"⚠️ 播报异常：{e}"))
             except Exception:
                 pass
-
-
-import asyncio
-
-
-import json
-from nonebot import logger, require
-from nonebot_plugin_apscheduler import scheduler
