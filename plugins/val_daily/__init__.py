@@ -487,20 +487,3 @@ import asyncio
 import json
 from nonebot import logger, require
 from nonebot_plugin_apscheduler import scheduler
-
-@scheduler.scheduled_job("date", id="val_debug_cookies")
-async def _debug_cookies():
-    import nonebot
-    from nonebot.adapters.onebot.v11 import Bot
-    await asyncio.sleep(3)
-    bots = [b for b in nonebot.get_bots().values() if isinstance(b, Bot)]
-    if not bots:
-        return
-    bot = bots[0]
-    for kwargs in ({}, {"domain": "qq.com"}, {"domain": "wegame.com.cn"},
-                   {"domain": "ptlogin2.qq.com"}):
-        try:
-            r = await bot.call_api("get_cookies", **kwargs)
-            logger.info(f"DEBUG cookies {kwargs}: {str(r)[:200]}")
-        except Exception as e:
-            logger.info(f"DEBUG cookies {kwargs}: FAIL {type(e).__name__}: {str(e)[:100]}")
