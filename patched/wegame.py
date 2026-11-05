@@ -212,18 +212,21 @@ class WegameClient:
                     response_cookies = {
                         name: morsel.value for name, morsel in response.cookies.items()
                     }
-            except (aiohttp.ClientError, asyncio.TimeoutError):
-                await self._record_auth_error("network_error")
+            except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+                logger.warning(f"refresh_ticket: network_error {type(e).__name__}: {e}")
+                await self._record_auth_error("network_error", relogin=True)
                 return False
             if response.status != 200:
+                logger.warning(f"refresh_ticket: http_{response.status}")
                 await self._record_auth_error(
                     f"http_{response.status}", relogin=response.status in {401, 403}
                 )
                 return False
             try:
                 body = json.loads(raw.decode("utf-8", "replace"))
-            except ValueError:
-                await self._record_auth_error("invalid_response")
+            except ValueError as e:
+                logger.warning(f"refresh_ticket: invalid_response {raw[:120]!r}")
+                await self._record_auth_error("invalid_response", relogin=True)
                 return False
             data = body.get("data") if isinstance(body.get("data"), dict) else {}
             invalid = (

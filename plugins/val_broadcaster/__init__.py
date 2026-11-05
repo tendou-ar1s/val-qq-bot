@@ -460,6 +460,13 @@ async def _check_login_health() -> Tuple[bool, str]:
                     await probe.close()
                 except Exception:  # noqa: BLE001
                     pass
+        # 强刷没有恢复（网络错/HTTP错/解析失败等路径不触发内部自愈）→ 直接免扫码重签
+        logger.warning("val_broadcaster: 强制刷新未恢复，直接尝试免扫码重签")
+        try:
+            if await client._auto_relogin():
+                return True, ""
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"val_broadcaster: 免扫码重签异常: {type(e).__name__}: {e}")
         return False, "票据刷新失败"
     finally:
         try:
